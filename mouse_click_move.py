@@ -264,7 +264,6 @@ class SettingsWindow(tk.Tk):
             heatmap_colored = (heatmap_colored * 255).astype(np.uint8)
             heatmap_image = Image.fromarray(heatmap_colored, mode='RGBA')
 
-            # 입력 모니터 화면 캡처
             bbox = (
                 self.input_monitor.x,
                 self.input_monitor.y,
