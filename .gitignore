@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# PyInstaller build artifacts (regenerate with: pyinstaller mouse_click_move2.spec)
+build/
+dist/
+*.manifest
+
+# OS
+Thumbs.db
+.DS_Store
