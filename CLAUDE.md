@@ -26,6 +26,7 @@ There are no lint, format, or test commands configured. `py -m py_compile` is th
 
 | File | Purpose |
 | --- | --- |
+| `mouse_analytics.py` | **Unified** recorder: click heatmap + movement distance + click/scroll counts, auto-saved to Excel (`openpyxl`, 3 sheets). Beginner UI, global hotkeys, excludes its own-window clicks |
 | `mouse_click_move2.py` | Mouse-click **heatmap** tool — the PyInstaller build target |
 | `mouse_distance1.0.6.py` | Tkinter canvas: click two points, compute pixel→mm distance via DPI |
 | `click_update_v1.0.9.py` | Click counter + travel/scroll distance tracker; `s` toggles; saves a `.txt` to Desktop |
@@ -39,13 +40,22 @@ Numbers in filenames (`v1.0.9`, `1.0.8`, `1.0.6`, the `2` in `mouse_click_move2`
 
 ## Recurring architecture (the heatmap / input tools)
 
-These patterns repeat across `mouse_click_move2.py` and `click_update_v1.0.9.py` and are the main thing to understand:
+These patterns repeat across `mouse_click_move2.py`, `click_update_v1.0.9.py`, and `mouse_analytics.py` and are the main thing to understand:
 
 - **Threading model:** Tkinter owns the main thread for the GUI. `pynput` `mouse.Listener` / `keyboard.GlobalHotKeys` run on their own background threads. Shared position lists are guarded by a `threading.Lock`. **Tkinter is not thread-safe** — listener-thread callbacks must marshal UI updates back to the main thread with `self.root.after(0, ...)`.
 - **Heatmap pipeline** (`mouse_click_move2.py`): accumulate click/move hits into a `numpy` array → `scipy.ndimage.gaussian_filter(sigma=30)` → normalize → apply a `matplotlib` colormap → convert to a `PIL` RGBA image → `Image.alpha_composite` over a `pyautogui.screenshot`. Caps stored points (`pop(0)` past 5000) to bound memory.
 - **DPI-safe sizing:** `mouse_click_move2.py` captures the screenshot *first* and sizes the heatmap to its actual pixel dimensions, avoiding DPI-scaling mismatch when compositing. It also writes a temp-dir log file, keeps Undo/Redo stacks, and wraps every listener/IO call in try/except.
 - **Multi-monitor:** `screeninfo.get_monitors()` enumerates monitors; global mouse coordinates are converted to monitor-relative before recording.
 - **DPI → physical distance:** `mouse_distance1.0.6.py` and `click_update_v1.0.9.py` derive `pixels_per_mm` from `hypot(w, h) / diagonal_inches` to convert pixel measurements into mm/cm.
+
+`mouse_analytics.py` adds three patterns on top of the above:
+- **Per-step ("software stage") model:** a recording is divided into *steps* — `Ctrl+Shift+F10` (`advance_step`) finalizes the current step (builds its heatmap, stores its stats, resets the click/distance/scroll accumulators) and re-captures the background for the next step; stop finalizes the last step. Each step's clicks/heatmap are independent, so you get one heatmap per software screen (Alignment → Orientation → …) in a single continuous recording.
+- **Excel auto-save** (`openpyxl`, MIT — added to `requirements.txt`): one workbook per session with a `summary` sheet (session info + a per-step table + totals), one `step{N}` sheet per step holding that step's embedded heatmap PNG (`openpyxl.drawing.image.Image`), and an `events` sheet (all events with a leading `step` column). Writes to a temp file then `os.replace`; if the target `.xlsx` is locked (open in Excel) it falls back to a `_backup_<ts>.xlsx`. Autosave fires from a single self-rescheduling `after(1000, tick)` (no extra timer thread).
+- **Own-window click exclusion:** global listeners would otherwise record clicks on this app's own buttons. `_own_rect` (cached on the main thread, `None` when minimized) + a `_suppress` flag (set around modal dialogs) make listener callbacks drop self-events. The rect comes from Win32 `GetWindowRect` on the `GA_ROOT` ancestor (`_window_frame_rect`), NOT `winfo_rootx/rooty` — the latter is the client area only, so dragging the window by its title bar would otherwise count as a click; the full frame (title bar + borders) must be excluded. Global hotkeys (`Ctrl+Shift+F9/F10`) + a "minimize on start" option let users avoid clicking the UI mid-recording entirely.
+- **Monitor selection defaults to the *primary* monitor** (`_default_monitor_index`, via `is_primary` or the `(0,0)` origin), not list index 0 — otherwise clicks on the primary fall outside a selected secondary monitor's bounds and nothing gets recorded. On a fully-empty session, stop warns "기록 없음" so the user re-checks the monitor.
+- **Screenshot heatmap background is captured once at recording start** (`_session_shot`), after briefly `withdraw()`-ing so the app's own window isn't in the shot. The chosen background mode (`_bg_mode`, blank vs screenshot) persists, so **stop rebuilds the heatmap in that mode with the full-session clicks** rather than silently overwriting it with a blank one.
+- **Move-event coalescing:** distance accumulates on every raw `on_move`, but a row is logged to `events` only every ~100 ms / ~50 px, bounding file size while keeping the distance total exact.
+- **No scipy/matplotlib (unlike `mouse_click_move2.py`):** the heatmap blurs with a hand-rolled numpy separable Gaussian (`_gaussian_blur`, float) and colors with a hand-rolled numpy `turbo` colormap (`_turbo_rgb`) using a density-proportional alpha (transparent where no clicks) plus an adjustable light-blue base wash (`BLUE_BASE_*`, "파란 배경 세기" slider). NOTE: the blur MUST stay in float — an earlier Pillow `ImageFilter.GaussianBlur` on a uint8 `L` image silently rounded the sparse, widely-spread blurred values below 1 down to 0, producing a totally empty heatmap. This keeps the PyInstaller onefile small (~30 MB) and dodges the scipy `_cyutility` hook breakage. Build with `mouse_analytics.spec` (onefile, windowed; excludes scipy/matplotlib/torch/pandas/…).
 
 ## Gotchas
 
