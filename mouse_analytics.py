@@ -127,11 +127,14 @@ class MouseAnalytics(tk.Tk):
         self.click_counts = {Button.left: 0, Button.right: 0, Button.middle: 0}
         self.total_distance_mm = 0.0
         self.scroll_count = 0       # 스크롤 칸 수(누적)
+        self.key_count = 0          # 키보드 입력 수(누적). 키 '내용'은 절대 저장하지 않음
+        self._keys_down = set()     # 오토리피트 중복 제거용 임시 보관(저장/기록 안 함)
         self.events = []            # (ts, type, button, x, y, monitor_idx, dist_px)
 
         # 세션/리스너 상태
         self.is_recording = False
         self.listener = None
+        self.kbd_listener = None
         self.session_start = None
         self.session_file = None
         self._last_heatmap_png = None
@@ -146,6 +149,7 @@ class MouseAnalytics(tk.Tk):
         self._ppm = DEFAULT_DPI / INCH_TO_MM   # pixels per mm
         self._rec_move = True
         self._rec_scroll = True
+        self._rec_key = True
 
         # 이동 이벤트 코얼레싱 상태
         self._last_move_pos = None
@@ -181,6 +185,7 @@ class MouseAnalytics(tk.Tk):
             "이 프로그램은 마우스 클릭/이동/스크롤을 전역으로 측정하고\n"
             "결과를 엑셀과 히트맵으로 자동 저장합니다.\n\n"
             "· 백신/권한 문제 시 예외 등록 또는 관리자 권한 실행을 권장합니다.\n"
+            "· 키보드는 입력 '횟수'만 셉니다 — 어떤 키를 쳤는지(내용)는 저장하지 않습니다.\n"
             "· 녹화 중에는 단축키(Ctrl+Shift+F9)로 제어하면 됩니다.",
         )
 
@@ -212,6 +217,9 @@ class MouseAnalytics(tk.Tk):
         self.scroll_label = tk.Label(stat, text="스크롤  0 칸",
                                      anchor="w", font=("맑은 고딕", 10))
         self.scroll_label.pack(fill="x", **pad)
+        self.key_label = tk.Label(stat, text="키 입력  0 회",
+                                  anchor="w", font=("맑은 고딕", 10))
+        self.key_label.pack(fill="x", **pad)
         self.time_label = tk.Label(stat, text="경과 시간  00:00:00",
                                    anchor="w", font=("맑은 고딕", 10))
         self.time_label.pack(fill="x", **pad)
@@ -257,6 +265,7 @@ class MouseAnalytics(tk.Tk):
 
         self.move_var = tk.BooleanVar(value=True)
         self.scroll_var = tk.BooleanVar(value=True)
+        self.kbd_var = tk.BooleanVar(value=True)
         self.autosave_var = tk.BooleanVar(value=True)
         self.minimize_var = tk.BooleanVar(value=True)
         tk.Checkbutton(cfg, text="이동 기록", variable=self.move_var).grid(
@@ -265,6 +274,8 @@ class MouseAnalytics(tk.Tk):
             row=5, column=1, sticky="w", **pad)
         tk.Checkbutton(cfg, text="자동저장", variable=self.autosave_var).grid(
             row=5, column=2, sticky="w", **pad)
+        tk.Checkbutton(cfg, text="키보드 기록", variable=self.kbd_var).grid(
+            row=5, column=3, sticky="w", **pad)
         tk.Checkbutton(cfg, text="시작 시 창 최소화", variable=self.minimize_var).grid(
             row=6, column=0, columnspan=2, sticky="w", **pad)
         self.bg_include_var = tk.BooleanVar(value=True)
@@ -412,6 +423,7 @@ class MouseAnalytics(tk.Tk):
         self._ppm = self.pixels_per_mm()
         self._rec_move = bool(self.move_var.get())
         self._rec_scroll = bool(self.scroll_var.get())
+        self._rec_key = bool(self.kbd_var.get())
 
         self.session_start = datetime.datetime.now()
         self.session_file = os.path.join(
@@ -422,6 +434,8 @@ class MouseAnalytics(tk.Tk):
             self.click_counts = {Button.left: 0, Button.right: 0, Button.middle: 0}
             self.total_distance_mm = 0.0
             self.scroll_count = 0
+            self.key_count = 0
+            self._keys_down.clear()
             self.events.clear()
             self._last_move_pos = None
             self._last_sample_pos = None
@@ -443,6 +457,17 @@ class MouseAnalytics(tk.Tk):
             self.listener = None
             return
 
+        # 키보드 입력 수 집계용 리스너(별개). GlobalHotKeys 와 공존. 키 내용은 안 받음.
+        self.kbd_listener = None
+        if self._rec_key:
+            try:
+                self.kbd_listener = keyboard.Listener(
+                    on_press=self.on_key_press, on_release=self.on_key_release)
+                self.kbd_listener.start()
+            except Exception as e:
+                logging.error("Keyboard listener start failed: %s", e)
+                self.kbd_listener = None
+
         self.is_recording = True
         self.monitor_combo.config(state="disabled")
         self.start_button.config(text="■ 정지 (Ctrl+Shift+F9)", bg="#d9534f")
@@ -462,6 +487,13 @@ class MouseAnalytics(tk.Tk):
             except Exception as e:
                 logging.error("Listener stop failed: %s", e)
             self.listener = None
+        if self.kbd_listener is not None:
+            try:
+                self.kbd_listener.stop()
+                self.kbd_listener.join()
+            except Exception as e:
+                logging.error("Keyboard listener stop failed: %s", e)
+            self.kbd_listener = None
         self.is_recording = False
         self.deiconify()
         self.monitor_combo.config(state="readonly")
@@ -535,6 +567,7 @@ class MouseAnalytics(tk.Tk):
                 "right": self.click_counts[Button.right],
                 "middle": self.click_counts[Button.middle],
                 "scroll": self.scroll_count,
+                "keys": self.key_count,
                 "distance_mm": self.total_distance_mm,
                 "events": list(self.events),
                 "start": self._step_start or self.session_start,
@@ -544,6 +577,8 @@ class MouseAnalytics(tk.Tk):
             self.click_counts = {Button.left: 0, Button.right: 0, Button.middle: 0}
             self.total_distance_mm = 0.0
             self.scroll_count = 0
+            self.key_count = 0
+            self._keys_down.clear()
             self.events.clear()
             self._last_move_pos = None
             self._last_sample_pos = None
@@ -650,6 +685,30 @@ class MouseAnalytics(tk.Tk):
                 self.events.pop(0)
         self.after(0, self.refresh_labels)
 
+    def on_key_press(self, key):
+        self._safe(self._on_key_press, key)
+
+    def _on_key_press(self, key):
+        """키 입력 '횟수'만 센다. 어떤 키인지(내용)는 events/엑셀에 절대 저장하지 않는다.
+
+        key 객체는 오토리피트 중복 제거(_keys_down)를 위해 메모리에서만 잠시 쓰이고
+        release 시 버려지며, 어디에도 기록되지 않는다."""
+        if not self.is_recording or not self._rec_key or self._suppress:
+            return
+        with self.lock:
+            if key in self._keys_down:      # 키를 누르고 있는 동안의 오토리피트 무시
+                return
+            self._keys_down.add(key)
+            self.key_count += 1
+        self.after(0, self.refresh_labels)
+
+    def on_key_release(self, key):
+        self._safe(self._on_key_release, key)
+
+    def _on_key_release(self, key):
+        with self.lock:
+            self._keys_down.discard(key)
+
     # --- 라이브 UI 갱신 (메인 스레드) ---------------------------------------
     def refresh_labels(self):
         with self.lock:
@@ -658,6 +717,7 @@ class MouseAnalytics(tk.Tk):
             middle = self.click_counts[Button.middle]
             dist_mm = self.total_distance_mm
             scrolls = self.scroll_count
+            keys = self.key_count
         total = left + right + middle
         px = dist_mm * self._ppm
         cm = dist_mm * MM_TO_CM
@@ -665,6 +725,7 @@ class MouseAnalytics(tk.Tk):
             text=f"클릭  총 {total}  (좌 {left} · 우 {right} · 휠 {middle})")
         self.distance_label.config(text=f"이동 거리  {px:,.0f} px  /  {cm:.1f} cm")
         self.scroll_label.config(text=f"스크롤  {scrolls} 칸")
+        self.key_label.config(text=f"키 입력  {keys} 회")
 
     def tick(self):
         """1초마다: 경과시간 갱신 + 자동저장 카운트다운 + 자기영역 안전망 갱신."""
@@ -773,6 +834,7 @@ class MouseAnalytics(tk.Tk):
                 "right": self.click_counts[Button.right],
                 "middle": self.click_counts[Button.middle],
                 "scroll": self.scroll_count,
+                "keys": self.key_count,
                 "distance_mm": self.total_distance_mm,
                 "n_events": len(self.events),
             }
@@ -818,6 +880,7 @@ class MouseAnalytics(tk.Tk):
             ("모니터", f"{mon_idx}: {monitor.width}x{monitor.height} at ({monitor.x},{monitor.y})"),
             ("사용 DPI", round(dpi, 1)),
             ("히트맵 배경", bg),
+            ("키보드 기록", "켜짐(횟수만)" if self._rec_key else "꺼짐"),
             ("단계 수", len(steps) + (1 if cur_active else 0)),
         ]
         r = 1
@@ -827,43 +890,44 @@ class MouseAnalytics(tk.Tk):
             r += 1
         r += 1                                          # 빈 줄
 
-        header = ["단계", "좌클릭", "우클릭", "휠클릭", "총클릭", "스크롤(칸)", "이동(cm)", "지속"]
+        header = ["단계", "좌클릭", "우클릭", "휠클릭", "총클릭",
+                  "스크롤(칸)", "키입력", "이동(cm)", "지속"]
         for c, h in enumerate(header, start=1):
             cell = ws.cell(row=r, column=c, value=h)
             cell.font = openpyxl.styles.Font(bold=True)
         r += 1
 
-        tot = {"left": 0, "right": 0, "middle": 0, "scroll": 0, "dist": 0.0}
+        tot = {"left": 0, "right": 0, "middle": 0, "scroll": 0, "keys": 0, "dist": 0.0}
 
-        def step_row(rownum, label, left, right, middle, scroll, dist_mm, dur):
+        def step_row(rownum, label, left, right, middle, scroll, keys, dist_mm, dur):
             vals = [label, left, right, middle, left + right + middle,
-                    scroll, round(dist_mm * MM_TO_CM, 1), dur]
+                    scroll, keys, round(dist_mm * MM_TO_CM, 1), dur]
             for c, v in enumerate(vals, start=1):
                 ws.cell(row=rownum, column=c, value=v)
 
         for rec in steps:
             step_row(r, rec["no"], rec["left"], rec["right"], rec["middle"],
-                     rec["scroll"], rec["distance_mm"],
+                     rec["scroll"], rec["keys"], rec["distance_mm"],
                      self._fmt_hms((rec["end"] - rec["start"]).total_seconds()))
             tot["left"] += rec["left"]; tot["right"] += rec["right"]
             tot["middle"] += rec["middle"]; tot["scroll"] += rec["scroll"]
-            tot["dist"] += rec["distance_mm"]
+            tot["keys"] += rec["keys"]; tot["dist"] += rec["distance_mm"]
             r += 1
         if cur_active:
             step_row(r, "현재(진행중)", cur["left"], cur["right"], cur["middle"],
-                     cur["scroll"], cur["distance_mm"], "")
+                     cur["scroll"], cur["keys"], cur["distance_mm"], "")
             tot["left"] += cur["left"]; tot["right"] += cur["right"]
             tot["middle"] += cur["middle"]; tot["scroll"] += cur["scroll"]
-            tot["dist"] += cur["distance_mm"]
+            tot["keys"] += cur["keys"]; tot["dist"] += cur["distance_mm"]
             r += 1
 
         step_row(r, "합계", tot["left"], tot["right"], tot["middle"],
-                 tot["scroll"], tot["dist"], "")
-        for c in range(1, 9):
+                 tot["scroll"], tot["keys"], tot["dist"], "")
+        for c in range(1, 10):
             ws.cell(row=r, column=c).font = openpyxl.styles.Font(bold=True)
 
         ws.column_dimensions["A"].width = 14
-        for col in "BCDEFGH":
+        for col in "BCDEFGHI":
             ws.column_dimensions[col].width = 10
 
     def _write_events_sheet(self, wb, steps):
@@ -906,6 +970,13 @@ class MouseAnalytics(tk.Tk):
             except Exception as e:
                 logging.error("Listener stop on close failed: %s", e)
             self.listener = None
+        if self.kbd_listener is not None:
+            try:
+                self.kbd_listener.stop()
+                self.kbd_listener.join()
+            except Exception as e:
+                logging.error("Keyboard listener stop on close failed: %s", e)
+            self.kbd_listener = None
         # 녹화 중이었다면 현재 단계를 마무리하고 최종 저장
         if self.is_recording:
             self.is_recording = False
